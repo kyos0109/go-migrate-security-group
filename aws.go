@@ -43,7 +43,7 @@ func GetFilterSGList(account *awsAuth, groupIds string) []*ec2.SecurityGroup {
 		exitErrorf("Unable to get descriptions for security groups, %v", err)
 	}
 
-	log.Println("Successfully get security group list ")
+	log.Println("Successfully get security group: ", len(result.SecurityGroups))
 	return result.SecurityGroups
 }
 
@@ -64,7 +64,7 @@ func GetSGList(account *awsAuth) []*ec2.SecurityGroup {
 		exitErrorf("Unable to get descriptions for security groups, %v", err)
 	}
 
-	log.Println("Successfully get security group: ", len(result.SecurityGroups))
+	log.Println("Successfully get security group list")
 	return result.SecurityGroups
 }
 
