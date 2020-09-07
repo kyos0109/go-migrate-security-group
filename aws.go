@@ -12,6 +12,11 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 )
 
+const (
+	sgSelf        = "sg-self"
+	sgDefaultName = "default"
+)
+
 func newSVC(account *awsAuth) *ec2.EC2 {
 	sess, err := session.NewSession(&aws.Config{
 		Region:      aws.String(account.Region),
@@ -69,9 +74,10 @@ func GetSGList(account *awsAuth) []*ec2.SecurityGroup {
 }
 
 func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
-	// delete default sg from source
+	// delete non vpc id default sg from source
 	for i, sg := range sgList {
-		if aws.StringValue(sg.GroupName) == "default" {
+		if aws.StringValue(sg.GroupName) == "default" && aws.StringValue(sg.VpcId) == "" {
+			log.Printf("This Source Security Group: %v(%v), Not Found VPC ID, Ignore SYNC.", *sg.GroupName, *sg.GroupId)
 			copy(sgList[i:], sgList[i+1:])
 			sgList[len(sgList)-1] = &ec2.SecurityGroup{}
 			sgList = sgList[:len(sgList)-1]
@@ -91,18 +97,39 @@ func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
 		}
 	}
 
+	gidMap := make(map[*string]*string)
+
+	for _, sg := range sgList {
+		gidMap[sg.GroupId] = sg.GroupName
+	}
+
 	// delete sg include sg id
 	for _, sg := range sgList {
-		for ii, ipp := range sg.IpPermissions {
-			for range ipp.UserIdGroupPairs {
-				copy(sg.IpPermissions[ii:], sg.IpPermissions[ii+1:])
-				sg.IpPermissions[len(sg.IpPermissions)-1] = &ec2.IpPermission{}
-				sg.IpPermissions = sg.IpPermissions[:len(sg.IpPermissions)-1]
-			}
-		}
+		tagSelfSecurityGroupID(sg.IpPermissions, sg.GroupId)
+	}
+
+	// delete sg include sg id
+	for _, sg := range sgList {
+		tagSelfSecurityGroupID(sg.IpPermissionsEgress, sg.GroupId)
 	}
 
 	return sgList
+}
+
+func tagSelfSecurityGroupID(ipps []*ec2.IpPermission, groupID *string) {
+	for i, ipp := range ipps {
+		for _, ugp := range ipp.UserIdGroupPairs {
+			if aws.StringValue(ugp.GroupId) == aws.StringValue(groupID) {
+				ugp.GroupId = aws.String(sgSelf)
+			} else {
+				log.Printf("Con't Copy Source Security Group ID(%v) to Destination, When Security Group ID Include Security Group ID(%v).", *groupID, *ugp.GroupId)
+				log.Print("ignore this setting.")
+				copy(ipps[i:], ipps[i+1:])
+				ipps[len(ipps)-1] = &ec2.IpPermission{}
+				ipps = ipps[:len(ipps)-1]
+			}
+		}
+	}
 }
 
 // CreateAndSyncSGList ...
@@ -113,10 +140,25 @@ func CreateAndSyncSGList(account *awsAuth, sgList []*ec2.SecurityGroup, dryRun *
 
 	for _, sg := range newSGList {
 		createRes, err := svc.CreateSecurityGroup(&ec2.CreateSecurityGroupInput{
-			DryRun:      dryRun,
-			GroupName:   aws.String(*sg.GroupName),
+			DryRun: dryRun,
+			GroupName: func(groupName *string) *string {
+				if aws.StringValue(groupName) == sgDefaultName {
+					return aws.String(aws.StringValue(groupName) + "-New")
+				}
+				return groupName
+			}(sg.GroupName),
 			Description: aws.String(*sg.Description),
 			VpcId:       aws.String(account.VIPCID),
+			TagSpecifications: func(sgTags []*ec2.Tag) []*ec2.TagSpecification {
+				tagList := &ec2.TagSpecification{}
+				if len(sgTags) > 0 {
+					tagList = &ec2.TagSpecification{
+						Tags:         sgTags,
+						ResourceType: aws.String(ec2.ResourceTypeSecurityGroup),
+					}
+				}
+				return []*ec2.TagSpecification{tagList}
+			}(sg.Tags),
 		})
 		if err != nil {
 			if aerr, ok := err.(awserr.Error); ok {
@@ -136,26 +178,38 @@ func CreateAndSyncSGList(account *awsAuth, sgList []*ec2.SecurityGroup, dryRun *
 		log.Printf("Created security group %s(%s) with VPC %s.\n",
 			aws.StringValue(sg.GroupName), aws.StringValue(createRes.GroupId), account.VIPCID)
 
-		_, err = svc.AuthorizeSecurityGroupIngress(&ec2.AuthorizeSecurityGroupIngressInput{
-			GroupId:       aws.String(*createRes.GroupId),
-			IpPermissions: sg.IpPermissions,
-		})
-		if err != nil {
-			exitErrorf("Unable to set security group %q ingress, %v", *sg.GroupName, err)
-		}
-
-		if len(sg.IpPermissionsEgress) > 0 {
-			_, err = svc.AuthorizeSecurityGroupEgress(&ec2.AuthorizeSecurityGroupEgressInput{
-
+		if len(sg.IpPermissions) > 0 {
+			_, err = svc.AuthorizeSecurityGroupIngress(&ec2.AuthorizeSecurityGroupIngressInput{
 				GroupId:       aws.String(*createRes.GroupId),
-				IpPermissions: sg.IpPermissionsEgress,
+				IpPermissions: setSelfSecurityGroupID(sg.IpPermissions, createRes.GroupId),
 			})
 			if err != nil {
 				exitErrorf("Unable to set security group %q ingress, %v", *sg.GroupName, err)
 			}
 		}
+
+		if len(sg.IpPermissionsEgress) > 0 {
+			_, err = svc.AuthorizeSecurityGroupEgress(&ec2.AuthorizeSecurityGroupEgressInput{
+				GroupId:       aws.String(*createRes.GroupId),
+				IpPermissions: setSelfSecurityGroupID(sg.IpPermissionsEgress, createRes.GroupId),
+			})
+			if err != nil {
+				exitErrorf("Unable to set security group %q Egress, %v", *sg.GroupName, err)
+			}
+		}
 	}
 	log.Println("Successfully set security group ingress")
+}
+
+func setSelfSecurityGroupID(ips []*ec2.IpPermission, groupID *string) []*ec2.IpPermission {
+	for _, ipp := range ips {
+		for _, ugp := range ipp.UserIdGroupPairs {
+			if aws.StringValue(ugp.GroupId) == sgSelf {
+				ugp.GroupId = groupID
+			}
+		}
+	}
+	return ips
 }
 
 // FindEC2TagName ...
