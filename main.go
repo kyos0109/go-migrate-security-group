@@ -23,16 +23,26 @@ func init() {
 	}
 }
 
+// AWSSync ...
+type AWSSync struct {
+	sourceSGLists []*ec2.SecurityGroup
+	perfixListMap map[string]*PerfixList
+}
+
 func main() {
+	var awssync AWSSync
+
+	awssync.perfixListMap = make(map[string]*PerfixList)
+
 	yamlConfig := GetConfig("config.yaml")
 
-	var sourceSGList []*ec2.SecurityGroup
-
 	if len(sourceSGID) > 0 {
-		sourceSGList = GetFilterSGList(&yamlConfig.Setting.Source, sourceSGID)
+		awssync.sourceSGLists = GetFilterSGListByIds(&yamlConfig.Setting.Source, sourceSGID)
+		awssync.GetPerfixLists(&yamlConfig.Setting.Source)
 	} else {
-		sourceSGList = GetSGList(&yamlConfig.Setting.Source)
+		awssync.sourceSGLists = GetSGList(&yamlConfig.Setting.Source)
+		awssync.GetPerfixLists(&yamlConfig.Setting.Source)
 	}
 
-	CreateAndSyncSGList(&yamlConfig.Setting.Destination, sourceSGList, &yamlConfig.Setting.DryRun)
+	awssync.CreateAndSyncSGList(&yamlConfig.Setting.Destination, &yamlConfig.Setting.DryRun)
 }

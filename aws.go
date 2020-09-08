@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -15,6 +16,23 @@ import (
 const (
 	sgSelf        = "sg-self"
 	sgDefaultName = "default"
+)
+
+// BuildSGMapType ...
+type BuildSGMapType map[*string][]*ec2.IpPermission
+
+// SGIdNameMapType ...
+type SGIdNameMapType map[string]string
+
+var (
+	// ID: Name
+	sgIDMameMap = make(SGIdNameMapType)
+
+	// Name: ID
+	newSGNameIDMap = make(SGIdNameMapType)
+
+	ipps  = make(BuildSGMapType)
+	ippes = make(BuildSGMapType)
 )
 
 func newSVC(account *awsAuth) *ec2.EC2 {
@@ -29,8 +47,31 @@ func newSVC(account *awsAuth) *ec2.EC2 {
 	return ec2.New(sess)
 }
 
-// GetFilterSGList ...
-func GetFilterSGList(account *awsAuth, groupIds string) []*ec2.SecurityGroup {
+// GetFilterSGListByNames ...
+func GetFilterSGListByNames(account *awsAuth, names string) []*ec2.SecurityGroup {
+	svc := newSVC(account)
+
+	result, err := svc.DescribeSecurityGroups(&ec2.DescribeSecurityGroupsInput{
+		GroupNames: aws.StringSlice([]string{names}),
+	})
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case "InvalidGroupName.Malformed":
+				fallthrough
+			case "InvalidGroup.NotFound":
+				exitErrorf("%s.", aerr.Message())
+			}
+		}
+		exitErrorf("Unable to get descriptions for security groups, %v", err)
+	}
+
+	log.Println("Successfully get security group, filter by name")
+	return result.SecurityGroups
+}
+
+// GetFilterSGListByIds ...
+func GetFilterSGListByIds(account *awsAuth, groupIds string) []*ec2.SecurityGroup {
 	svc := newSVC(account)
 
 	result, err := svc.DescribeSecurityGroups(&ec2.DescribeSecurityGroupsInput{
@@ -48,7 +89,7 @@ func GetFilterSGList(account *awsAuth, groupIds string) []*ec2.SecurityGroup {
 		exitErrorf("Unable to get descriptions for security groups, %v", err)
 	}
 
-	log.Println("Successfully get security group: ", len(result.SecurityGroups))
+	log.Println("Successfully get security group, filter by id")
 	return result.SecurityGroups
 }
 
@@ -71,6 +112,86 @@ func GetSGList(account *awsAuth) []*ec2.SecurityGroup {
 
 	log.Println("Successfully get security group list")
 	return result.SecurityGroups
+}
+
+// PerfixList ...
+type PerfixList struct {
+	OldPerfixListID   *string
+	newPerfixListID   *string
+	ManagedPrefixList *ec2.ManagedPrefixList
+	PrefixListEntry   []*ec2.PrefixListEntry
+}
+
+// GetPerfixLists ...
+func (awssync *AWSSync) GetPerfixLists(account *awsAuth) {
+	svc := newSVC(account)
+
+	for _, sg := range awssync.sourceSGLists {
+		for _, ipp := range sg.IpPermissions {
+			for _, plids := range ipp.PrefixListIds {
+				p := new(PerfixList)
+				p.OldPerfixListID = plids.PrefixListId
+				result, err := svc.GetManagedPrefixListEntries(&ec2.GetManagedPrefixListEntriesInput{
+					PrefixListId: p.OldPerfixListID,
+				})
+				if err != nil {
+					log.Println("Get PerfixList Error", err)
+				}
+
+				p.PrefixListEntry = result.Entries
+
+				perfixListInfo, err := svc.DescribeManagedPrefixLists(&ec2.DescribeManagedPrefixListsInput{
+					PrefixListIds: aws.StringSlice([]string{*p.OldPerfixListID}),
+				})
+				if err != nil {
+					log.Println("Describe Perfix Error", err)
+				}
+
+				p.ManagedPrefixList = perfixListInfo.PrefixLists[0]
+
+				awssync.perfixListMap[*p.OldPerfixListID] = p
+
+				log.Println("Found PerfixList, Add To Sync Data")
+				return
+			}
+		}
+	}
+	return
+}
+
+func (awssync *AWSSync) createPerfixList(svc *ec2.EC2) {
+	for i, v := range awssync.perfixListMap {
+		PerfixListAddr := convertAddPerfixList(v.PrefixListEntry)
+		tags := []*ec2.Tag{}
+
+		result, err := svc.CreateManagedPrefixList(&ec2.CreateManagedPrefixListInput{
+			AddressFamily:     v.ManagedPrefixList.AddressFamily,
+			Entries:           PerfixListAddr,
+			PrefixListName:    v.ManagedPrefixList.PrefixListName,
+			MaxEntries:        v.ManagedPrefixList.MaxEntries,
+			TagSpecifications: setSGTags(tags, "prefix-list"),
+		})
+		if err != nil {
+			log.Println("Create PerfixList Error", err)
+		}
+
+		awssync.perfixListMap[i].newPerfixListID = result.PrefixList.PrefixListId
+	}
+}
+
+func convertAddPerfixList(plist []*ec2.PrefixListEntry) []*ec2.AddPrefixListEntry {
+	var newPlist []*ec2.AddPrefixListEntry
+
+	for _, v := range plist {
+
+		pAddr := &ec2.AddPrefixListEntry{
+			Cidr:        v.Cidr,
+			Description: v.Description,
+		}
+
+		newPlist = append(newPlist, pAddr)
+	}
+	return newPlist
 }
 
 func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
@@ -97,68 +218,163 @@ func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
 		}
 	}
 
-	gidMap := make(map[*string]*string)
-
+	// delete Security Group include Security Group ID, and copy to new map.
 	for _, sg := range sgList {
-		gidMap[sg.GroupId] = sg.GroupName
+		for ii, ipp := range sg.IpPermissions {
+			for range ipp.UserIdGroupPairs {
+				if aws.StringValue(sg.GroupName) == sgDefaultName {
+					sg.IpPermissions[ii] = &ec2.IpPermission{}
+					break
+				}
+				ipps[sg.GroupId] = append(ippes[sg.GroupId], sg.IpPermissions[ii])
+				sg.IpPermissions[ii] = nil
+				break
+			}
+		}
 	}
 
-	// delete sg include sg id
+	// clean empty IpPermissions
+	// for _, sg := range sgList {
+	// 	for ii, ipp := range sg.IpPermissions {
+	// 		if len(ipp.IpRanges) <= 0 {
+	// 			fmt.Println(len(sg.IpPermissions))
+	// 			sg.IpPermissions = append(sg.IpPermissions[:ii], sg.IpPermissions[ii+1:]...)
+	// 		}
+	// 	}
+	// }
+
+	// delete Security Group include Security Group ID, and copy to new map.
 	for _, sg := range sgList {
-		tagSelfSecurityGroupID(sg.IpPermissions, sg.GroupId)
+		for ii, ipp := range sg.IpPermissionsEgress {
+			for range ipp.UserIdGroupPairs {
+				if aws.StringValue(sg.GroupName) == sgDefaultName {
+					sg.IpPermissionsEgress[ii] = &ec2.IpPermission{}
+					break
+				}
+				ippes[sg.GroupId] = append(ippes[sg.GroupId], sg.IpPermissionsEgress[ii])
+				sg.IpPermissionsEgress[ii] = &ec2.IpPermission{}
+				break
+			}
+		}
 	}
 
-	// delete sg include sg id
+	// clean empty IpPermissionsEgress
 	for _, sg := range sgList {
-		tagSelfSecurityGroupID(sg.IpPermissionsEgress, sg.GroupId)
+		for ii, ipp := range sg.IpPermissionsEgress {
+			if len(ipp.IpRanges) <= 0 {
+				sg.IpPermissionsEgress = append(sg.IpPermissionsEgress[:ii], sg.IpPermissionsEgress[ii+1:]...)
+			}
+		}
 	}
 
 	return sgList
 }
 
-func tagSelfSecurityGroupID(ipps []*ec2.IpPermission, groupID *string) {
-	for i, ipp := range ipps {
-		for _, ugp := range ipp.UserIdGroupPairs {
-			if aws.StringValue(ugp.GroupId) == aws.StringValue(groupID) {
-				ugp.GroupId = aws.String(sgSelf)
-			} else {
-				log.Printf("Con't Copy Source Security Group ID(%v) to Destination, When Security Group ID Include Security Group ID(%v).", *groupID, *ugp.GroupId)
-				log.Print("ignore this setting.")
-				copy(ipps[i:], ipps[i+1:])
-				ipps[len(ipps)-1] = &ec2.IpPermission{}
-				ipps = ipps[:len(ipps)-1]
+func replaceGroupID(ippMap BuildSGMapType) BuildSGMapType {
+	newBuildSG := make(BuildSGMapType)
+
+	for k, v := range newSGNameIDMap {
+		fmt.Println(k, v)
+	}
+
+	for k, v := range sgIDMameMap {
+		fmt.Println(k, v)
+	}
+
+	for gid, data := range ippMap {
+		gName, ok := sgIDMameMap[aws.StringValue(gid)]
+		if !ok {
+			log.Println("Not Found Old Security Group ID In Map, ID:", *gid)
+			break
+		}
+
+		newGID, ok := newSGNameIDMap[gName]
+		if !ok {
+			log.Println("Not Found New Security Group Name In Map, Name:", gName)
+			break
+		}
+
+		newBuildSG[aws.String(newGID)] = data
+	}
+
+	for _, ipp := range newBuildSG {
+		for _, ips := range ipp {
+			for _, ugp := range ips.UserIdGroupPairs {
+				gName, ok := sgIDMameMap[aws.StringValue(ugp.GroupId)]
+				if !ok {
+					log.Println("Not Found Old Security Group ID In Map, From UserIdGroupPairs, ID:", *ugp.GroupId)
+					break
+				}
+
+				if gName == sgDefaultName {
+
+				}
+
+				newID, ok := newSGNameIDMap[gName]
+				if !ok {
+					log.Println("Not Found New Security Group Name In Map, From UserIdGroupPairs, Name:", gName)
+					break
+				}
+
+				ugp.GroupId = aws.String(newID)
 			}
 		}
 	}
+
+	return newBuildSG
+}
+
+func (awssync *AWSSync) replacePerfixListID(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
+	for _, sg := range sgList {
+		for _, ipp := range sg.IpPermissions {
+			if ipp != nil {
+				for _, plist := range ipp.PrefixListIds {
+					plist.PrefixListId = awssync.perfixListMap[*plist.PrefixListId].newPerfixListID
+				}
+			}
+		}
+	}
+	return sgList
+}
+
+func setSGTags(tags []*ec2.Tag, resourceType string) []*ec2.TagSpecification {
+	tagList := &ec2.TagSpecification{}
+	timeTag := &ec2.Tag{}
+
+	timeTag.Key = aws.String("CreateAt")
+	timeTag.Value = aws.String(time.Now().String())
+
+	tags = append(tags, timeTag)
+
+	if len(tags) > 0 {
+		tagList = &ec2.TagSpecification{
+			Tags:         tags,
+			ResourceType: aws.String(resourceType),
+		}
+	}
+	return []*ec2.TagSpecification{tagList}
 }
 
 // CreateAndSyncSGList ...
-func CreateAndSyncSGList(account *awsAuth, sgList []*ec2.SecurityGroup, dryRun *bool) {
+func (awssync *AWSSync) CreateAndSyncSGList(account *awsAuth, dryRun *bool) {
 	svc := newSVC(account)
 
-	newSGList := deletSGDefaultValue(sgList)
+	defaultSGID := deletSGDefaultValue(GetFilterSGListByNames(account, sgDefaultName))[0]
+
+	newSGList := deletSGDefaultValue(awssync.sourceSGLists)
+
+	awssync.createPerfixList(svc)
+
+	newSGList = awssync.replacePerfixListID(newSGList)
 
 	for _, sg := range newSGList {
+		sgIDMameMap[*sg.GroupId] = *sg.GroupName
 		createRes, err := svc.CreateSecurityGroup(&ec2.CreateSecurityGroupInput{
-			DryRun: dryRun,
-			GroupName: func(groupName *string) *string {
-				if aws.StringValue(groupName) == sgDefaultName {
-					return aws.String(aws.StringValue(groupName) + "-New")
-				}
-				return groupName
-			}(sg.GroupName),
-			Description: aws.String(*sg.Description),
-			VpcId:       aws.String(account.VIPCID),
-			TagSpecifications: func(sgTags []*ec2.Tag) []*ec2.TagSpecification {
-				tagList := &ec2.TagSpecification{}
-				if len(sgTags) > 0 {
-					tagList = &ec2.TagSpecification{
-						Tags:         sgTags,
-						ResourceType: aws.String(ec2.ResourceTypeSecurityGroup),
-					}
-				}
-				return []*ec2.TagSpecification{tagList}
-			}(sg.Tags),
+			DryRun:            dryRun,
+			GroupName:         sg.GroupName,
+			Description:       sg.Description,
+			VpcId:             aws.String(account.VIPCID),
+			TagSpecifications: setSGTags(sg.Tags, ec2.ResourceTypeSecurityGroup),
 		})
 		if err != nil {
 			if aerr, ok := err.(awserr.Error); ok {
@@ -169,18 +385,32 @@ func CreateAndSyncSGList(account *awsAuth, sgList []*ec2.SecurityGroup, dryRun *
 					exitErrorf("Security group %q already exists.", *sg.GroupName)
 				case "DryRunOperation":
 					exitErrorf("DryRunOperation to create security group %q, %v", *sg.GroupName, err)
+				case "InvalidParameterValue":
+					if aws.StringValue(sg.GroupName) == sgDefaultName {
+						log.Print("Found default group, switch id.")
+						createRes.GroupId = defaultSGID.GroupId
+						break
+					}
+					exitErrorf("InvalidParameterValue to create security group %q, %v", *sg.GroupName, err)
 				default:
 					exitErrorf("Unable to create security group %q, %v", *sg.GroupName, err)
 				}
 			}
 		}
 
+		if aws.StringValue(sg.GroupName) == "ebacc-dev-redis" {
+			fmt.Println(len(sg.IpPermissions))
+			fmt.Println(sg.IpPermissions)
+		}
+		// all new security group id
+		newSGNameIDMap[*sg.GroupName] = *createRes.GroupId
+
 		log.Printf("Created security group %s(%s) with VPC %s.\n",
 			aws.StringValue(sg.GroupName), aws.StringValue(createRes.GroupId), account.VIPCID)
 
-		if len(sg.IpPermissions) > 0 {
+		if len(sg.IpPermissions) > 0 && sg.IpPermissions[0] != nil {
 			_, err = svc.AuthorizeSecurityGroupIngress(&ec2.AuthorizeSecurityGroupIngressInput{
-				GroupId:       aws.String(*createRes.GroupId),
+				GroupId:       createRes.GroupId,
 				IpPermissions: setSelfSecurityGroupID(sg.IpPermissions, createRes.GroupId),
 			})
 			if err != nil {
@@ -188,9 +418,9 @@ func CreateAndSyncSGList(account *awsAuth, sgList []*ec2.SecurityGroup, dryRun *
 			}
 		}
 
-		if len(sg.IpPermissionsEgress) > 0 {
+		if len(sg.IpPermissionsEgress) > 0 && sg.IpPermissionsEgress[0] != nil {
 			_, err = svc.AuthorizeSecurityGroupEgress(&ec2.AuthorizeSecurityGroupEgressInput{
-				GroupId:       aws.String(*createRes.GroupId),
+				GroupId:       createRes.GroupId,
 				IpPermissions: setSelfSecurityGroupID(sg.IpPermissionsEgress, createRes.GroupId),
 			})
 			if err != nil {
@@ -198,29 +428,50 @@ func CreateAndSyncSGList(account *awsAuth, sgList []*ec2.SecurityGroup, dryRun *
 			}
 		}
 	}
+
+	if len(ipps) > 0 {
+		newUgpMap := replaceGroupID(ipps)
+
+		for gid, ipps := range newUgpMap {
+			_, err := svc.AuthorizeSecurityGroupIngress(&ec2.AuthorizeSecurityGroupIngressInput{
+				GroupId:       gid,
+				IpPermissions: ipps,
+			})
+			if err != nil {
+				exitErrorf("Unable to set security group %q ingress, %v", *gid, err)
+			}
+		}
+
+	}
+
+	if len(ippes) > 0 {
+		newUgpMap := replaceGroupID(ippes)
+
+		for gid, ipps := range newUgpMap {
+			_, err := svc.AuthorizeSecurityGroupEgress(&ec2.AuthorizeSecurityGroupEgressInput{
+				GroupId:       gid,
+				IpPermissions: ipps,
+			})
+			if err != nil {
+				exitErrorf("Unable to set security group %q Egress, %v", *gid, err)
+			}
+		}
+	}
+
 	log.Println("Successfully set security group ingress")
 }
 
 func setSelfSecurityGroupID(ips []*ec2.IpPermission, groupID *string) []*ec2.IpPermission {
 	for _, ipp := range ips {
-		for _, ugp := range ipp.UserIdGroupPairs {
-			if aws.StringValue(ugp.GroupId) == sgSelf {
-				ugp.GroupId = groupID
+		if ipp != nil {
+			for _, ugp := range ipp.UserIdGroupPairs {
+				if aws.StringValue(ugp.GroupId) == sgSelf {
+					ugp.GroupId = groupID
+				}
 			}
 		}
 	}
 	return ips
-}
-
-// FindEC2TagName ...
-func FindEC2TagName(tags []*ec2.Tag) *string {
-	for i, v := range tags {
-		if *v.Key == "Name" {
-			return tags[i].Value
-		}
-	}
-	log.Println("Not Found Tag Name, Other Tags: ", tags)
-	return nil
 }
 
 func exitErrorf(msg string, args ...interface{}) {
