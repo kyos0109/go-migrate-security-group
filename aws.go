@@ -223,7 +223,7 @@ func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
 		for ii, ipp := range sg.IpPermissions {
 			for range ipp.UserIdGroupPairs {
 				if aws.StringValue(sg.GroupName) == sgDefaultName {
-					sg.IpPermissions[ii] = &ec2.IpPermission{}
+					sg.IpPermissions[ii] = nil
 					break
 				}
 				ipps[sg.GroupId] = append(ippes[sg.GroupId], sg.IpPermissions[ii])
@@ -248,38 +248,30 @@ func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
 		for ii, ipp := range sg.IpPermissionsEgress {
 			for range ipp.UserIdGroupPairs {
 				if aws.StringValue(sg.GroupName) == sgDefaultName {
-					sg.IpPermissionsEgress[ii] = &ec2.IpPermission{}
+					sg.IpPermissionsEgress[ii] = nil
 					break
 				}
 				ippes[sg.GroupId] = append(ippes[sg.GroupId], sg.IpPermissionsEgress[ii])
-				sg.IpPermissionsEgress[ii] = &ec2.IpPermission{}
+				sg.IpPermissionsEgress[ii] = nil
 				break
 			}
 		}
 	}
 
-	// clean empty IpPermissionsEgress
-	for _, sg := range sgList {
-		for ii, ipp := range sg.IpPermissionsEgress {
-			if len(ipp.IpRanges) <= 0 {
-				sg.IpPermissionsEgress = append(sg.IpPermissionsEgress[:ii], sg.IpPermissionsEgress[ii+1:]...)
-			}
-		}
-	}
+	// // clean empty IpPermissionsEgress
+	// for _, sg := range sgList {
+	// 	for ii, ipp := range sg.IpPermissionsEgress {
+	// 		if len(ipp.IpRanges) <= 0 {
+	// 			sg.IpPermissionsEgress = append(sg.IpPermissionsEgress[:ii], sg.IpPermissionsEgress[ii+1:]...)
+	// 		}
+	// 	}
+	// }
 
 	return sgList
 }
 
 func replaceGroupID(ippMap BuildSGMapType) BuildSGMapType {
 	newBuildSG := make(BuildSGMapType)
-
-	for k, v := range newSGNameIDMap {
-		fmt.Println(k, v)
-	}
-
-	for k, v := range sgIDMameMap {
-		fmt.Println(k, v)
-	}
 
 	for gid, data := range ippMap {
 		gName, ok := sgIDMameMap[aws.StringValue(gid)]
@@ -304,10 +296,6 @@ func replaceGroupID(ippMap BuildSGMapType) BuildSGMapType {
 				if !ok {
 					log.Println("Not Found Old Security Group ID In Map, From UserIdGroupPairs, ID:", *ugp.GroupId)
 					break
-				}
-
-				if gName == sgDefaultName {
-
 				}
 
 				newID, ok := newSGNameIDMap[gName]
@@ -369,6 +357,7 @@ func (awssync *AWSSync) CreateAndSyncSGList(account *awsAuth, dryRun *bool) {
 
 	for _, sg := range newSGList {
 		sgIDMameMap[*sg.GroupId] = *sg.GroupName
+
 		createRes, err := svc.CreateSecurityGroup(&ec2.CreateSecurityGroupInput{
 			DryRun:            dryRun,
 			GroupName:         sg.GroupName,
@@ -398,10 +387,6 @@ func (awssync *AWSSync) CreateAndSyncSGList(account *awsAuth, dryRun *bool) {
 			}
 		}
 
-		if aws.StringValue(sg.GroupName) == "ebacc-dev-redis" {
-			fmt.Println(len(sg.IpPermissions))
-			fmt.Println(sg.IpPermissions)
-		}
 		// all new security group id
 		newSGNameIDMap[*sg.GroupName] = *createRes.GroupId
 
