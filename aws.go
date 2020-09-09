@@ -233,16 +233,6 @@ func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
 		}
 	}
 
-	// clean empty IpPermissions
-	// for _, sg := range sgList {
-	// 	for ii, ipp := range sg.IpPermissions {
-	// 		if len(ipp.IpRanges) <= 0 {
-	// 			fmt.Println(len(sg.IpPermissions))
-	// 			sg.IpPermissions = append(sg.IpPermissions[:ii], sg.IpPermissions[ii+1:]...)
-	// 		}
-	// 	}
-	// }
-
 	// delete Security Group include Security Group ID, and copy to new map.
 	for _, sg := range sgList {
 		for ii, ipp := range sg.IpPermissionsEgress {
@@ -257,15 +247,6 @@ func deletSGDefaultValue(sgList []*ec2.SecurityGroup) []*ec2.SecurityGroup {
 			}
 		}
 	}
-
-	// // clean empty IpPermissionsEgress
-	// for _, sg := range sgList {
-	// 	for ii, ipp := range sg.IpPermissionsEgress {
-	// 		if len(ipp.IpRanges) <= 0 {
-	// 			sg.IpPermissionsEgress = append(sg.IpPermissionsEgress[:ii], sg.IpPermissionsEgress[ii+1:]...)
-	// 		}
-	// 	}
-	// }
 
 	return sgList
 }
