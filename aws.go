@@ -129,6 +129,10 @@ func (awssync *AWSSync) GetPerfixLists(account *awsAuth) {
 	for _, sg := range awssync.sourceSGLists {
 		for _, ipp := range sg.IpPermissions {
 			for _, plids := range ipp.PrefixListIds {
+				if _, ok := awssync.perfixListMap[*plids.PrefixListId]; ok {
+					continue
+				}
+
 				p := new(PerfixList)
 				p.OldPerfixListID = plids.PrefixListId
 				result, err := svc.GetManagedPrefixListEntries(&ec2.GetManagedPrefixListEntriesInput{
@@ -151,8 +155,7 @@ func (awssync *AWSSync) GetPerfixLists(account *awsAuth) {
 
 				awssync.perfixListMap[*p.OldPerfixListID] = p
 
-				log.Println("Found PerfixList, Add To Sync Data")
-				return
+				log.Printf("Found PerfixList: %v, Add To Sync Data", *p.OldPerfixListID)
 			}
 		}
 	}
