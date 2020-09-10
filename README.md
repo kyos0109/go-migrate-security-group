@@ -6,7 +6,7 @@ Support Security Groups Include Security Group ID.
 
 Support Security Groups Include Managed prefix lists.
 
-Support Update Sync Security Groups.
+Support Update(Revoke) Sync Security Groups.
 
 example config.yaml
 ```yaml
