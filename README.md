@@ -2,6 +2,12 @@
 
 The command copies the aws security group to another aws account.
 
+Support Security Groups Include Security Group ID.
+
+Support Security Groups Include Managed prefix lists.
+
+Support Update Sync Security Groups.
+
 example config.yaml
 ```yaml
 Setting:
