@@ -1,3 +1,5 @@
+### This repository is archive, Please visit to https://github.com/kyos0109/go-aws-migrate
+
 # go-migrate-security-group
 
 The command copies the aws security group to another aws account.
